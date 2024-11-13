@@ -132,11 +132,6 @@ struct Vector {
 		Item.nItems++;
 	}
 
-	// Replaces instructions in order, size does not change
-	void Overwrite(_In_ DWORD i, _In_ Vector<T> Item) {
-
-	}
-
 	void Release() {
 		if (raw.pBytes && !bCannotBeReleased) free(raw.pBytes);
 		raw.pBytes = NULL;
@@ -191,10 +186,6 @@ struct Vector {
 		}
 		return false;
 	}
-
-	//~Vector() {
-		//Release();
-	//}
 };
 
 enum PEStatus_t : BYTE {
@@ -222,7 +213,7 @@ typedef struct {
 /// Parses portable executable formats
 /// </summary>
 class PE {
-protected:
+public:
 	PEStatus_t Status = NotSet;
 	Buffer DosStub = { 0 };
 	Buffer Overlay = { 0 };
@@ -232,7 +223,6 @@ protected:
 	ComboNTHeaders NTHeaders = { 0 };
 	IMAGE_SECTION_HEADER* pSectionHeaders = NULL;
 	bool x86 = false;
-public:
 
 	/// <summary>
 	/// Creates PE object with given file
