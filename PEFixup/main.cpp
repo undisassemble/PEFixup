@@ -97,7 +97,8 @@ int main(int argc, char** argv) {
 				printf("ADDRESS required\n");
 				return 1;
 			}
-			Settings.Dump.RunningAddr = strtoull(argv[i + 1], NULL, 0);
+			Settings.Dump.RunningAddr = strtoull(argv[i + 1], NULL, 16);
+			if (!Settings.Dump.RunningAddr) Settings.Dump.RunningAddr = strtoull(argv[i + 1], NULL, 0);
 			i++;
 		} else if (!lstrcmpA(argv[i], "--headers")) {
 			if (i == argc - 1) {
@@ -203,11 +204,13 @@ int main(int argc, char** argv) {
 			hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, entry.th32ProcessID);
 			if (!hProc || hProc == INVALID_HANDLE_VALUE) {
 				printf("Could not open process \'%s\' (Reason: %d)\n", Settings.input, GetLastError());
+				return 1;
 			}
 		} else {
 			printf("--name or --pid must be selected when dumping\n");
 			return 1;
 		}
+
 
 		// Dump process
 		PE* pHeaders = NULL;
@@ -226,6 +229,12 @@ int main(int argc, char** argv) {
 			default:
 				break;
 			}
+			//for (int i = 0; i < pHeaders->NTHeaders.x64.FileHeader.NumberOfSections; i++) {
+				//if (pHeaders->pSectionData[i]) {
+					//free(pHeaders->pSectionData[i]);
+					//pHeaders->pSectionData[i] = NULL;
+				//}
+			//}
 		}
 		file = DumpPEFromMemory(hProc, Settings.Dump.RunningAddr, pHeaders);
 		if (pHeaders) delete pHeaders;
@@ -233,7 +242,6 @@ int main(int argc, char** argv) {
 			printf("Failed to dump process\n");
 			return 1;
 		}
-		file->NTHeaders.x64.OptionalHeader.ImageBase = Settings.Dump.RunningAddr;
 	}
 
 	// Post mode
@@ -280,9 +288,7 @@ int main(int argc, char** argv) {
 					Buffer data = { 0 };
 					data.pBytes = file->pSectionData[sec];
 					data.u64Size = file->pSectionHeaders[sec].SizeOfRawData;
-					if (FindSig(data, Sigs::EPs[i].raw, Sigs::EPs[i].mask)) {
-
-					}
+					
 				}
 			}
 		}
@@ -328,27 +334,36 @@ PE* DumpPEFromMemory(_In_ HANDLE hProcess, _In_opt_ uint64_t u64Base, _In_opt_ P
 		pHeaders->DosStub.pBytes = reinterpret_cast<BYTE*>(malloc(pHeaders->DosStub.u64Size));
 		ReadProcessMemory(hProcess, (LPVOID)(u64Base + sizeof(IMAGE_DOS_HEADER)), pHeaders->DosStub.pBytes, pHeaders->DosStub.u64Size, NULL);
 		ReadProcessMemory(hProcess, (LPVOID)(u64Base + pHeaders->DosHeader.e_lfanew), &pHeaders->NTHeaders, sizeof(IMAGE_NT_HEADERS64), NULL);
+		if (pHeaders->DosHeader.e_magic != IMAGE_DOS_SIGNATURE || pHeaders->NTHeaders.x64.Signature != IMAGE_NT_SIGNATURE) {
+			printf("Failed to read process headers!\n");
+			return NULL;
+		}
+		pHeaders->pSectionHeaders = reinterpret_cast<IMAGE_SECTION_HEADER*>(malloc(sizeof(IMAGE_SECTION_HEADER) * pHeaders->NTHeaders.x64.FileHeader.NumberOfSections));
+		pHeaders->pSectionData = reinterpret_cast<BYTE**>(calloc(pHeaders->NTHeaders.x64.FileHeader.NumberOfSections, sizeof(BYTE*)));
 	}
+
+	// Create thingy
+	PE* ret = new PE(pHeaders);
 
 	// Read process memory
-	Buffer mem = { 0 };
-	mem.u64Size = pHeaders->NTHeaders.x64.OptionalHeader.SizeOfImage;
-	mem.pBytes = reinterpret_cast<BYTE*>(malloc(mem.u64Size));
-	ReadProcessMemory(hProcess, (LPVOID)u64Base, mem.pBytes, mem.u64Size, NULL);
-	
-	// Copy headers
-	if (pHeaders) {
-		memcpy(mem.pBytes, &pHeaders->DosHeader, sizeof(IMAGE_DOS_HEADER));
-		memcpy(mem.pBytes + sizeof(IMAGE_DOS_HEADER), pHeaders->DosStub.pBytes, pHeaders->DosStub.u64Size);
-		memcpy(mem.pBytes + pHeaders->DosHeader.e_lfanew, &pHeaders->NTHeaders, sizeof(IMAGE_NT_HEADERS64));
-		memcpy(mem.pBytes + pHeaders->DosHeader.e_lfanew + sizeof(IMAGE_NT_HEADERS64), pHeaders->pSectionHeaders, pHeaders->NTHeaders.x64.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER));
+	for (int i = 0; i < ret->NTHeaders.x64.FileHeader.NumberOfSections; i++) {
+		ret->pSectionHeaders[i].SizeOfRawData = ret->pSectionHeaders[i].Misc.VirtualSize;
+		ret->pSectionData[i] = reinterpret_cast<BYTE*>(malloc(ret->pSectionHeaders[i].SizeOfRawData));
+		DWORD dwOld = 0;
+		VirtualProtectEx(hProcess, (LPVOID)(u64Base + ret->pSectionHeaders[i].VirtualAddress), ret->pSectionHeaders[i].SizeOfRawData, PAGE_EXECUTE_READWRITE, &dwOld);
+		if (!ReadProcessMemory(hProcess, (LPVOID)(u64Base + ret->pSectionHeaders[i].VirtualAddress), ret->pSectionData[i], ret->pSectionHeaders[i].SizeOfRawData, NULL)) {
+			printf("Failed to read section \'%.8s\'! (%d) (%p -> %p)\n", ret->pSectionHeaders[i].Name, GetLastError(), u64Base + ret->pSectionHeaders[i].VirtualAddress, u64Base + ret->pSectionHeaders[i].VirtualAddress + ret->pSectionHeaders[i].SizeOfRawData);
+			if (dwOld & PAGE_GUARD) printf("Memory had PAGE_GUARD set\n");
+			return NULL;
+		}
+		VirtualProtectEx(hProcess, (LPVOID)(u64Base + ret->pSectionHeaders[i].VirtualAddress), ret->pSectionHeaders[i].SizeOfRawData, dwOld, &dwOld);
+		printf("Dumped section \'%.8s\', %p -> %p\n", ret->pSectionHeaders[i].Name, u64Base + ret->pSectionHeaders[i].VirtualAddress, u64Base + ret->pSectionHeaders[i].VirtualAddress + ret->pSectionHeaders[i].SizeOfRawData);
 	}
 
-	// Adjust and return
+	// return
 	if (bUnloadHeaders && pHeaders) delete pHeaders;
-	PE* ret = AdjustPE(mem);
 	ret->NTHeaders.x64.OptionalHeader.ImageBase = u64Base;
-	free(mem.pBytes);
+	ret->FixHeaders();
 	return ret;
 }
 
@@ -390,8 +405,10 @@ PE* AdjustPE(_In_ Buffer raw) {
 	pAdjusted->Status = Normal;
 	memcpy(&pAdjusted->DosHeader, raw.pBytes, sizeof(IMAGE_DOS_HEADER));
 	pAdjusted->DosStub.u64Size = pAdjusted->DosHeader.e_lfanew - sizeof(IMAGE_DOS_HEADER);
-	pAdjusted->DosStub.pBytes = reinterpret_cast<BYTE*>(malloc(pAdjusted->DosStub.u64Size));
-	memcpy(pAdjusted->DosStub.pBytes, raw.pBytes + sizeof(IMAGE_DOS_HEADER), pAdjusted->DosStub.u64Size);
+	if (pAdjusted->DosStub.u64Size) {
+		pAdjusted->DosStub.pBytes = reinterpret_cast<BYTE*>(malloc(pAdjusted->DosStub.u64Size));
+		memcpy(pAdjusted->DosStub.pBytes, raw.pBytes + sizeof(IMAGE_DOS_HEADER), pAdjusted->DosStub.u64Size);
+	}
 	memcpy(&pAdjusted->NTHeaders, raw.pBytes + pAdjusted->DosHeader.e_lfanew, sizeof(IMAGE_NT_HEADERS64));
 	if (pAdjusted->DosHeader.e_magic != IMAGE_DOS_SIGNATURE || pAdjusted->NTHeaders.x64.Signature != IMAGE_NT_SIGNATURE) {
 		printf("Invalid headers!\n");
@@ -406,12 +423,12 @@ PE* AdjustPE(_In_ Buffer raw) {
 	DWORD dwOff = pAdjusted->pSectionHeaders[0].PointerToRawData;
 	for (int i = 0; i < pAdjusted->NTHeaders.x64.FileHeader.NumberOfSections; i++) {
 		pAdjusted->pSectionHeaders[i].SizeOfRawData = pAdjusted->pSectionHeaders[i].Misc.VirtualSize;
-		dwOff += pAdjusted->pSectionHeaders[i].SizeOfRawData;
-		dwOff += (dwOff % pAdjusted->NTHeaders.x64.OptionalHeader.FileAlignment) ? pAdjusted->NTHeaders.x64.OptionalHeader.FileAlignment - (dwOff % pAdjusted->NTHeaders.x64.OptionalHeader.FileAlignment) : 0;
 		pAdjusted->pSectionData[i] = reinterpret_cast<BYTE*>(malloc(pAdjusted->pSectionHeaders[i].SizeOfRawData));
 		memcpy(pAdjusted->pSectionData[i], raw.pBytes + pAdjusted->pSectionHeaders[i].VirtualAddress, pAdjusted->pSectionHeaders[i].SizeOfRawData);
+		printf("Copied section \'%.8s\', %p -> %p\n", pAdjusted->pSectionHeaders[i].Name, pAdjusted->GetBaseAddress() + pAdjusted->pSectionHeaders[i].VirtualAddress, pAdjusted->GetBaseAddress() + pAdjusted->pSectionHeaders[i].VirtualAddress + pAdjusted->pSectionHeaders[i].SizeOfRawData);
 	}
 
+	pAdjusted->FixHeaders();
 	return pAdjusted;
 }
 
