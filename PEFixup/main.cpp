@@ -3,9 +3,17 @@
 #include <TlHelp32.h>
 #include <winternl.h>
 #include "pe.hpp"
+#include "sigs.hpp"
+
+enum Mode_t : BYTE {
+	UNSET,
+	PRE,
+	DUMP,
+	POST,
+};
 
 struct {
-	BYTE mode = 0; // 0 - Unset, 1 - pre, 2 - post
+	Mode_t mode = UNSET;
 	char* input = NULL;
 	char* output = "a.exe";
 
@@ -13,17 +21,20 @@ struct {
 		bool bDisableASLR : 1 = true;
 		bool bRemoveBrokenTLS : 1 = true;
 	} Pre;
-	
+
 	struct {
 		bool bPID : 1 = false;
 		bool bName : 1 = false;
+		char* headers = NULL;
+		uint64_t RunningAddr = 0;
+	} Dump;
+	
+	struct {
 		bool bSetIfFound : 1 = true;
 		bool bScanEntry : 1 = true;
 		bool bScanTLS : 1 = true;
 		bool bFixLayout : 1 = true;
 		bool bIgnoreNonExecutable : 1 = false;
-		char* headers = NULL;
-		uint64_t RunningAddr = 0;
 	} Post;
 } Settings;
 
@@ -45,9 +56,11 @@ int main(int argc, char** argv) {
 
 	// Get command
 	if (!lstrcmpA(argv[1], "pre")) {
-		Settings.mode = 1;
+		Settings.mode = PRE;
 	} else if (!lstrcmpA(argv[1], "post")) {
-		Settings.mode = 2;
+		Settings.mode = POST;
+	} else if (!lstrcmpA(argv[1], "dump")) {
+		Settings.mode = DUMP;
 	} else if (!lstrcmpA(argv[1], "--help") || !lstrcmpA(argv[1], "-h")) {
 		HelpMenu(argv[0]);
 		return 0;
@@ -76,22 +89,22 @@ int main(int argc, char** argv) {
 		} else if (!lstrcmpA(argv[i], "--no-tls")) {
 			Settings.Pre.bRemoveBrokenTLS = false;
 		} else if (!lstrcmpA(argv[i], "--pid")) {
-			Settings.Post.bPID = true;
+			Settings.Dump.bPID = true;
 		} else if (!lstrcmpA(argv[i], "--name")) {
-			Settings.Post.bName = true;
+			Settings.Dump.bName = true;
 		} else if (!lstrcmpA(argv[i], "--base")) {
 			if (i == argc - 1) {
 				printf("ADDRESS required\n");
 				return 1;
 			}
-			Settings.Post.RunningAddr = strtoull(argv[i + 1], NULL, 0);
+			Settings.Dump.RunningAddr = strtoull(argv[i + 1], NULL, 0);
 			i++;
 		} else if (!lstrcmpA(argv[i], "--headers")) {
 			if (i == argc - 1) {
 				printf("FILE required\n");
 				return 1;
 			}
-			Settings.Post.headers = argv[i];
+			Settings.Dump.headers = argv[i + 1];
 			i++;
 		} else if (!lstrcmpA(argv[i], "--no-oep")) {
 			Settings.Post.bScanEntry = false;
@@ -112,7 +125,7 @@ int main(int argc, char** argv) {
 	PE* file = NULL;
 
 	// Pre mode
-	if (Settings.mode == 1) {
+	if (Settings.mode == PRE) {
 		file = new PE(Settings.input);
 		switch (file->GetStatus()) {
 		case NoFile:
@@ -156,19 +169,18 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	// Post mode
-	else if (Settings.mode == 2) {
-		
+	// Dump mode
+	else if (Settings.mode == DUMP) {
 		// Get handle to running process
 		HANDLE hProc = NULL;
-		if (Settings.Post.bPID) {
+		if (Settings.Dump.bPID) {
 			DWORD PID = strtoul(Settings.input, NULL, 0);
 			hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, PID);
 			if (!hProc || hProc == INVALID_HANDLE_VALUE) {
 				printf("Could not open process with PID %d (Reason: %d)\n", PID, GetLastError());
 				return 1;
 			}
-		} else if (Settings.Post.bName) {
+		} else if (Settings.Dump.bName) {
 			// Find process
 			PROCESSENTRY32 entry = { 0 };
 			entry.dwSize = sizeof(PROCESSENTRY32);
@@ -192,70 +204,90 @@ int main(int argc, char** argv) {
 			if (!hProc || hProc == INVALID_HANDLE_VALUE) {
 				printf("Could not open process \'%s\' (Reason: %d)\n", Settings.input, GetLastError());
 			}
+		} else {
+			printf("--name or --pid must be selected when dumping\n");
+			return 1;
 		}
 
-		// Dump process (if applicable)
-		if (hProc) {
-			PE* pHeaders = NULL;
-			if (Settings.Post.headers) {
-				pHeaders = new PE(Settings.Post.headers);
-				switch (pHeaders->GetStatus()) {
-				case NoFile:
-					printf("Cannot read file \'%s\'\n", Settings.Post.headers);
-					return 1;
-				case NotPE:
-					printf("Cannot parser headers for \'%s\'\n", Settings.Post.headers);
-					return 1;
-				case Unsupported:
-					printf("Unsupported architecture\n");
-					return 1;
-				default:
-					break;
+		// Dump process
+		PE* pHeaders = NULL;
+		if (Settings.Dump.headers) {
+			pHeaders = new PE(Settings.Dump.headers);
+			switch (pHeaders->GetStatus()) {
+			case NoFile:
+				printf("Cannot read file \'%s\'\n", Settings.Dump.headers);
+				return 1;
+			case NotPE:
+				printf("Cannot parser headers for \'%s\'\n", Settings.Dump.headers);
+				return 1;
+			case Unsupported:
+				printf("Unsupported architecture\n");
+				return 1;
+			default:
+				break;
+			}
+		}
+		file = DumpPEFromMemory(hProc, Settings.Dump.RunningAddr, pHeaders);
+		if (pHeaders) delete pHeaders;
+		if (!file) {
+			printf("Failed to dump process\n");
+			return 1;
+		}
+		file->NTHeaders.x64.OptionalHeader.ImageBase = Settings.Dump.RunningAddr;
+	}
+
+	// Post mode
+	else if (Settings.mode == POST) {
+		// Load from disk
+		HANDLE hFile = CreateFileA(Settings.input, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (!hFile || hFile == INVALID_HANDLE_VALUE) {
+			printf("Failed to read file \'%s\' (Reason: %d)\n", Settings.input, GetLastError());
+			return 1;
+		}
+
+		// Guess if it's too large
+		DWORD Size = GetFileSize(hFile, NULL);
+		IMAGE_DOS_HEADER DosHeader = { 0 };
+		IMAGE_NT_HEADERS64 NtHeaders = { 0 };
+		ReadFile(hFile, &DosHeader, sizeof(IMAGE_DOS_HEADER), NULL, NULL);
+		SetFilePointer(hFile, DosHeader.e_lfanew, NULL, FILE_BEGIN);
+		ReadFile(hFile, &NtHeaders, sizeof(IMAGE_NT_HEADERS64), NULL, NULL);
+
+		// Adjust if too large
+		if (Size >= NtHeaders.OptionalHeader.SizeOfImage) {
+			Buffer bytes = { 0 };
+			bytes.u64Size = Size;
+			bytes.pBytes = reinterpret_cast<BYTE*>(malloc(Size));
+			SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+			ReadFile(hFile, bytes.pBytes, Size, NULL, NULL);
+			file = AdjustPE(bytes);
+			if (Settings.Dump.RunningAddr) file->NTHeaders.x64.OptionalHeader.ImageBase = Settings.Dump.RunningAddr;
+			free(bytes.pBytes);
+		}
+		
+		// Load like normal
+		else {
+			file = new PE(hFile);
+		}
+
+		// Scan for entry points
+		if (Settings.Post.bScanEntry) {
+			for (int sec = 0; sec < file->NTHeaders.x64.FileHeader.NumberOfSections; sec++) {
+				// Skip non-executable sections
+				if (Settings.Post.bIgnoreNonExecutable && !(file->pSectionHeaders[sec].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+				
+				for (int i = 0; i < sizeof(Sigs::EPs) / sizeof(Sigs::EPs[0]); i++) {
+					Buffer data = { 0 };
+					data.pBytes = file->pSectionData[sec];
+					data.u64Size = file->pSectionHeaders[sec].SizeOfRawData;
+					if (FindSig(data, Sigs::EPs[i].raw, Sigs::EPs[i].mask)) {
+
+					}
 				}
 			}
-			file = DumpPEFromMemory(hProc, Settings.Post.RunningAddr, pHeaders);
-			if (pHeaders) delete pHeaders;
-			if (!file) {
-				printf("Failed to dump process\n");
-				return 1;
-			}
 		}
 
-		// Load from disk
-		else {
-			HANDLE hFile = CreateFileA(Settings.input, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-			if (!hFile || hFile == INVALID_HANDLE_VALUE) {
-				printf("Failed to read file \'%s\' (Reason: %d)\n", Settings.input, GetLastError());
-				return 1;
-			}
-
-			// Guess if it's too large
-			DWORD Size = GetFileSize(hFile, NULL);
-			IMAGE_DOS_HEADER DosHeader = { 0 };
-			IMAGE_NT_HEADERS64 NtHeaders = { 0 };
-			ReadFile(hFile, &DosHeader, sizeof(IMAGE_DOS_HEADER), NULL, NULL);
-			SetFilePointer(hFile, DosHeader.e_lfanew, NULL, FILE_BEGIN);
-			ReadFile(hFile, &NtHeaders, sizeof(IMAGE_NT_HEADERS64), NULL, NULL);
-
-			// Adjust if too large
-			if (Size >= NtHeaders.OptionalHeader.SizeOfImage) {
-				Buffer bytes = { 0 };
-				bytes.u64Size = Size;
-				bytes.pBytes = reinterpret_cast<BYTE*>(malloc(Size));
-				SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
-				ReadFile(hFile, bytes.pBytes, Size, NULL, NULL);
-				file = AdjustPE(bytes);
-				if (Settings.Post.RunningAddr) file->NTHeaders.x64.OptionalHeader.ImageBase = Settings.Post.RunningAddr;
-				free(bytes.pBytes);
-			}
-			
-			// Load like normal
-			else {
-				file = new PE(hFile);
-			}
-
-			CloseHandle(hFile);
-		}
+		CloseHandle(hFile);
 	}
 
 	// Output file
@@ -290,6 +322,7 @@ PE* DumpPEFromMemory(_In_ HANDLE hProcess, _In_opt_ uint64_t u64Base, _In_opt_ P
 	if (!pHeaders) {
 		bUnloadHeaders = true;
 		pHeaders = new PE(false);
+		pHeaders->Status = Normal;
 		ReadProcessMemory(hProcess, (LPVOID)u64Base, &pHeaders->DosHeader, sizeof(IMAGE_DOS_HEADER), NULL);
 		pHeaders->DosStub.u64Size = pHeaders->DosHeader.e_lfanew - sizeof(IMAGE_DOS_HEADER);
 		pHeaders->DosStub.pBytes = reinterpret_cast<BYTE*>(malloc(pHeaders->DosStub.u64Size));
@@ -330,13 +363,41 @@ PE* AdjustPE(_In_ Buffer raw) {
 	if (!raw.pBytes || raw.u64Size < sizeof(IMAGE_DOS_HEADER) + sizeof(IMAGE_NT_HEADERS64))
 		return NULL;
 
+	// Load headers from other file
+	if (Settings.Dump.headers) {
+		HANDLE hFile = CreateFileA(Settings.Dump.headers, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (!hFile || hFile == INVALID_HANDLE_VALUE) {
+			printf("Failed to open file \'%s\'\n", Settings.Dump.headers);
+			return NULL;
+		}
+		ReadFile(hFile, raw.pBytes, sizeof(IMAGE_DOS_HEADER), NULL, NULL);
+		IMAGE_DOS_HEADER* pDosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(raw.pBytes);
+		if (pDosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+			printf("Invalid headers!\n");
+			return NULL;
+		}
+		ReadFile(hFile, raw.pBytes + sizeof(IMAGE_DOS_HEADER), pDosHeader->e_lfanew - sizeof(IMAGE_DOS_HEADER) + sizeof(IMAGE_NT_HEADERS64), NULL, NULL);
+		IMAGE_NT_HEADERS64* pNtHeaders = reinterpret_cast<IMAGE_NT_HEADERS64*>(raw.pBytes + pDosHeader->e_lfanew);
+		if (pNtHeaders->Signature != IMAGE_NT_SIGNATURE) {
+			printf("Invalid headers!\n");
+			return NULL;
+		}
+		ReadFile(hFile, raw.pBytes + pDosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS64), pNtHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER), NULL, NULL);
+	}
+
 	// Load headers
 	PE* pAdjusted = new PE(false);
+	pAdjusted->Status = Normal;
 	memcpy(&pAdjusted->DosHeader, raw.pBytes, sizeof(IMAGE_DOS_HEADER));
 	pAdjusted->DosStub.u64Size = pAdjusted->DosHeader.e_lfanew - sizeof(IMAGE_DOS_HEADER);
 	pAdjusted->DosStub.pBytes = reinterpret_cast<BYTE*>(malloc(pAdjusted->DosStub.u64Size));
 	memcpy(pAdjusted->DosStub.pBytes, raw.pBytes + sizeof(IMAGE_DOS_HEADER), pAdjusted->DosStub.u64Size);
 	memcpy(&pAdjusted->NTHeaders, raw.pBytes + pAdjusted->DosHeader.e_lfanew, sizeof(IMAGE_NT_HEADERS64));
+	if (pAdjusted->DosHeader.e_magic != IMAGE_DOS_SIGNATURE || pAdjusted->NTHeaders.x64.Signature != IMAGE_NT_SIGNATURE) {
+		printf("Invalid headers!\n");
+		delete pAdjusted;
+		return NULL;
+	}
 	pAdjusted->pSectionHeaders = reinterpret_cast<IMAGE_SECTION_HEADER*>(malloc(pAdjusted->NTHeaders.x64.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)));
 	memcpy(pAdjusted->pSectionHeaders, raw.pBytes + pAdjusted->DosHeader.e_lfanew + sizeof(IMAGE_NT_HEADERS64), pAdjusted->NTHeaders.x64.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER));
 
@@ -364,6 +425,7 @@ void HelpMenu(_In_ char* argv0) {
 	
 	printf("COMMAND\n");
 	printf("\tpre\t\tIntended for use before running and dumping an application\n");
+	printf("\tdump\t\tDump a running process to disk\n");
 	printf("\tpost\t\tIntended for use on a dumped application\n\n");
 
 	printf("GENERAL OPTIONS\n");
@@ -373,10 +435,13 @@ void HelpMenu(_In_ char* argv0) {
 	printf("\t--no-aslr\tDon\'t touch ASLR, leave as is\n");
 	printf("\t--no-tls\tDon\'t remove invalid TLS callbacks\n\n");
 
-	printf("POST OPTIONS\n");
+	printf("DUMP OPTIONS\n");
 	printf("\t--pid\t\tFILE is the PID of a running process\n");
 	printf("\t--name\t\tFILE is the name of a running process\n");
 	printf("\t--base ADDRESS\tBase address of running process/dumped PE\n");
+	printf("\t--headers FILE\tSpecify PE that contains dumped PE\'s headers\n\n");
+
+	printf("POST OPTIONS\n");
 	printf("\t--headers FILE\tSpecify PE that contains dumped PE\'s headers\n");
 	printf("\t--dont-set\tDon\'t change EP or TLS entry points, even if matching sig is found\n");
 	printf("\t--no-oep\tDon\'t scan for possible OEP\n");
