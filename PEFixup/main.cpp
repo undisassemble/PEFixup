@@ -35,6 +35,7 @@ struct {
 		bool bScanTLS : 1 = true;
 		bool bFixLayout : 1 = true;
 		bool bIgnoreNonExecutable : 1 = false;
+		bool bRemoveDebug : 1 = true;
 	} Post;
 } Settings;
 
@@ -107,6 +108,8 @@ int main(int argc, char** argv) {
 			}
 			Settings.Dump.headers = argv[i + 1];
 			i++;
+		} else if (!lstrcmpA(argv[i], "--no-debug")) {
+			Settings.Post.bRemoveDebug = false;
 		} else if (!lstrcmpA(argv[i], "--no-oep")) {
 			Settings.Post.bScanEntry = false;
 		} else if (!lstrcmpA(argv[i], "--no-tls")) {
@@ -229,12 +232,6 @@ int main(int argc, char** argv) {
 			default:
 				break;
 			}
-			//for (int i = 0; i < pHeaders->NTHeaders.x64.FileHeader.NumberOfSections; i++) {
-				//if (pHeaders->pSectionData[i]) {
-					//free(pHeaders->pSectionData[i]);
-					//pHeaders->pSectionData[i] = NULL;
-				//}
-			//}
 		}
 		file = DumpPEFromMemory(hProc, Settings.Dump.RunningAddr, pHeaders);
 		if (pHeaders) delete pHeaders;
@@ -276,6 +273,14 @@ int main(int argc, char** argv) {
 		// Load like normal
 		else {
 			file = new PE(hFile);
+		}
+
+		// Remove debug info
+		if (Settings.Post.bRemoveDebug) {
+			file->NTHeaders.x64.FileHeader.NumberOfSymbols = 0;
+			file->NTHeaders.x64.FileHeader.PointerToSymbolTable = 0;
+			file->NTHeaders.x64.OptionalHeader.DataDirectory[6].Size = 0;
+			file->NTHeaders.x64.OptionalHeader.DataDirectory[6].VirtualAddress = 0;
 		}
 
 		// Scan for entry points
@@ -463,6 +468,7 @@ void HelpMenu(_In_ char* argv0) {
 	printf("\t--dont-set\tDon\'t change EP or TLS entry points, even if matching sig is found\n");
 	printf("\t--no-oep\tDon\'t scan for possible OEP\n");
 	printf("\t--no-tls\tDon\'t scan for possible TLS callbacks\n");
+	printf("\t--no-debug\tDon\'t remove debugging information\n");
 	printf("\t--disk\t\tFILE has already been adjusted to disk format (i.e. Scylla dump)\n");
 	printf("\t--x-only\tOnly scan memory in executable ranges\n");
 }
