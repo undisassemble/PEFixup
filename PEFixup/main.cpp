@@ -257,6 +257,7 @@ int main(int argc, char** argv) {
 		ReadFile(hFile, &DosHeader, sizeof(IMAGE_DOS_HEADER), NULL, NULL);
 		SetFilePointer(hFile, DosHeader.e_lfanew, NULL, FILE_BEGIN);
 		ReadFile(hFile, &NtHeaders, sizeof(IMAGE_NT_HEADERS64), NULL, NULL);
+		SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
 
 		// Adjust if too large
 		if (Size >= NtHeaders.OptionalHeader.SizeOfImage) {
@@ -281,6 +282,7 @@ int main(int argc, char** argv) {
 			file->NTHeaders.x64.FileHeader.PointerToSymbolTable = 0;
 			file->NTHeaders.x64.OptionalHeader.DataDirectory[6].Size = 0;
 			file->NTHeaders.x64.OptionalHeader.DataDirectory[6].VirtualAddress = 0;
+			printf("Removed debugging info\n");
 		}
 
 		// Scan for entry points
@@ -293,7 +295,13 @@ int main(int argc, char** argv) {
 					Buffer data = { 0 };
 					data.pBytes = file->pSectionData[sec];
 					data.u64Size = file->pSectionHeaders[sec].SizeOfRawData;
-					
+					uint64_t nOff = FindSig(data, Sigs::EPs[i].raw, Sigs::EPs[i].mask);
+					if (nOff != _UI64_MAX) {
+						printf("EP match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, Sigs::EPs[i].name);
+						if (Settings.Post.bSetIfFound) {
+							file->NTHeaders.x64.OptionalHeader.AddressOfEntryPoint = file->pSectionHeaders[sec].VirtualAddress + nOff, Sigs::EPs[i].name;
+						}
+					}
 				}
 			}
 		}
@@ -482,7 +490,7 @@ void HelpMenu(_In_ char* argv0) {
 /// <param name="mask">Pattern mask (i.e. "xxx???xx", matches all bytes except "?")</param>
 /// <returns>_UI64_MAX if not found, otherwise it's the offset to it</returns>
 size_t FindSig(Buffer buf, BYTE* pattern, char* mask) {
-	if (!pattern || !mask || buf.pBytes || buf.u64Size) return _UI64_MAX;
+	if (!pattern || !mask || !buf.pBytes || !buf.u64Size) return _UI64_MAX;
 
 	BYTE patternlen = lstrlenA(mask);
 	size_t off = 0;
