@@ -306,6 +306,29 @@ int main(int argc, char** argv) {
 			}
 		}
 
+		// Scan for TLS callbacks
+		if (Settings.Post.bScanTLS) {
+			Vector<uint64_t> Callbacks;
+
+			for (int sec = 0; sec < file->NTHeaders.x64.FileHeader.NumberOfSections; sec++) {
+				// Skip non-executable sections
+				if (Settings.Post.bIgnoreNonExecutable && !(file->pSectionHeaders[sec].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+
+				for (int i = 0; i < sizeof(Sigs::TLS) / sizeof(Sigs::TLS[0]); i++) {
+					Buffer data = { 0 };
+					data.pBytes = file->pSectionData[sec];
+					data.u64Size = file->pSectionHeaders[sec].SizeOfRawData;
+					uint64_t nOff = FindSig(data, Sigs::TLS[i].raw, Sigs::TLS[i].mask);
+					if (nOff != _UI64_MAX) {
+						printf("Callback match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, Sigs::TLS[i].name);
+						if (Settings.Post.bSetIfFound) {
+							Callbacks.Push(file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff);
+						}
+					}
+				}
+			}
+		}
+
 		CloseHandle(hFile);
 	}
 
