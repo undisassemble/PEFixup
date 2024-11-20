@@ -57,7 +57,7 @@ PE::PE(_In_ PE* pOther) {
 	memcpy(pSectionHeaders, pOther->pSectionHeaders, NTHeaders.x64.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER));
 	pSectionData = reinterpret_cast<BYTE**>(malloc(NTHeaders.x64.FileHeader.NumberOfSections * sizeof(BYTE*)));
 	for (int i = 0; i < NTHeaders.x64.FileHeader.NumberOfSections; i++) {
-		if (pSectionHeaders[i].SizeOfRawData) {
+		if (pSectionHeaders[i].SizeOfRawData && pOther->pSectionData[i]) {
 			pSectionData[i] = reinterpret_cast<BYTE*>(malloc(pSectionHeaders[i].SizeOfRawData));
 			memcpy(pSectionData[i], pOther->pSectionData[i], pSectionHeaders[i].SizeOfRawData);
 		} else {
@@ -124,13 +124,8 @@ bool PE::ParseFile(_In_ HANDLE hFile) {
 		return false;
 	}
 
-	if (IMAGE_NUMBEROF_DIRECTORY_ENTRIES - this->NTHeaders.x64.OptionalHeader.NumberOfRvaAndSizes)
-		memset(&this->NTHeaders.x64.OptionalHeader.DataDirectory[this->NTHeaders.x64.OptionalHeader.NumberOfRvaAndSizes], 0, sizeof(IMAGE_DATA_DIRECTORY) * (IMAGE_NUMBEROF_DIRECTORY_ENTRIES -
-			this->NTHeaders.x64.OptionalHeader.NumberOfRvaAndSizes));
-
 	this->pSectionHeaders = reinterpret_cast<IMAGE_SECTION_HEADER*>(malloc(sizeof(IMAGE_SECTION_HEADER) * this->NTHeaders.x64.FileHeader.NumberOfSections));
-	memcpy(this->pSectionHeaders, pBytes + this->DosHeader.e_lfanew + this->NTHeaders.x64.FileHeader.SizeOfOptionalHeader + sizeof(IMAGE_FILE_HEADER) + 4, sizeof(IMAGE_SECTION_HEADER) *
-		this->NTHeaders.x64.FileHeader.NumberOfSections);
+	memcpy(this->pSectionHeaders, pBytes + this->DosHeader.e_lfanew + this->NTHeaders.x64.FileHeader.SizeOfOptionalHeader + sizeof(IMAGE_FILE_HEADER) + 4, sizeof(IMAGE_SECTION_HEADER) * this->NTHeaders.x64.FileHeader.NumberOfSections);
 	this->pSectionData = reinterpret_cast<BYTE**>(malloc(sizeof(BYTE*) * this->NTHeaders.x64.FileHeader.NumberOfSections));
 	
 	for (int i = 0; i < this->NTHeaders.x64.FileHeader.NumberOfSections; i++) {

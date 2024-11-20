@@ -33,7 +33,7 @@ struct {
 		bool bSetIfFound : 1 = true;
 		bool bScanEntry : 1 = true;
 		bool bScanTLS : 1 = true;
-		bool bFixLayout : 1 = true;
+		bool bFixLayout : 1 = false;
 		bool bIgnoreNonExecutable : 1 = false;
 		bool bRemoveDebug : 1 = true;
 	} Post;
@@ -114,8 +114,8 @@ int main(int argc, char** argv) {
 			Settings.Post.bScanEntry = false;
 		} else if (!lstrcmpA(argv[i], "--no-tls")) {
 			Settings.Post.bScanTLS = false;
-		} else if (!lstrcmpA(argv[i], "--disk")) {
-			Settings.Post.bFixLayout = false;
+		} else if (!lstrcmpA(argv[i], "--dumped")) {
+			Settings.Post.bFixLayout = true;
 		} else if (!lstrcmpA(argv[i], "--x-only")) {
 			Settings.Post.bIgnoreNonExecutable = true;
 		} else {
@@ -148,7 +148,11 @@ int main(int argc, char** argv) {
 		// Disable ASLR
 		if (Settings.Pre.bDisableASLR) {
 			if (!(file->GetNtHeaders()->x64.FileHeader.Characteristics & IMAGE_FILE_DLL) && file->GetNtHeaders()->x64.OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE) {
-				file->GetNtHeaders()->x64.OptionalHeader.DllCharacteristics &= ~IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
+				if (file->x86) {
+					file->GetNtHeaders()->x86.OptionalHeader.DllCharacteristics &= ~IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
+				} else {
+					file->GetNtHeaders()->x64.OptionalHeader.DllCharacteristics &= ~IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
+				}
 				file->GetNtHeaders()->x64.FileHeader.Characteristics |= IMAGE_FILE_RELOCS_STRIPPED;
 				printf("Disabled ASLR\n");
 			} else {
@@ -161,7 +165,7 @@ int main(int argc, char** argv) {
 			uint64_t* pTLS = file->GetTLSCallbacks();
 			int tr = 0;
 			for (int i = 0; pTLS && pTLS[i]; i++) {
-				if (pTLS[i] < file->GetBaseAddress() || pTLS[i] > file->GetBaseAddress() + file->GetNtHeaders()->x64.OptionalHeader.SizeOfImage) {
+				if (pTLS[i] < file->GetBaseAddress() || pTLS[i] > file->GetBaseAddress() + (file->x86 ? file->GetNtHeaders()->x86.OptionalHeader.SizeOfImage : file->GetNtHeaders()->x64.OptionalHeader.SizeOfImage)) {
 					printf("Removed invalid TLS callback: %p\n", pTLS[i]);
 					pTLS[i] = 0;
 				} else {
@@ -253,21 +257,28 @@ int main(int argc, char** argv) {
 		// Guess if it's too large
 		DWORD Size = GetFileSize(hFile, NULL);
 		IMAGE_DOS_HEADER DosHeader = { 0 };
-		IMAGE_NT_HEADERS64 NtHeaders = { 0 };
+		ComboNTHeaders NtHeaders = { 0 };
 		ReadFile(hFile, &DosHeader, sizeof(IMAGE_DOS_HEADER), NULL, NULL);
 		SetFilePointer(hFile, DosHeader.e_lfanew, NULL, FILE_BEGIN);
-		ReadFile(hFile, &NtHeaders, sizeof(IMAGE_NT_HEADERS64), NULL, NULL);
+		ReadFile(hFile, &NtHeaders, sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER), NULL, NULL);
+		ReadFile(hFile, &NtHeaders.x64.OptionalHeader, NtHeaders.x64.FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 ? sizeof(IMAGE_OPTIONAL_HEADER64) : sizeof(IMAGE_OPTIONAL_HEADER32), NULL, NULL);
 		SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
 
 		// Adjust if too large
-		if (Size >= NtHeaders.OptionalHeader.SizeOfImage) {
+		if (Settings.Post.bFixLayout) {
 			Buffer bytes = { 0 };
 			bytes.u64Size = Size;
 			bytes.pBytes = reinterpret_cast<BYTE*>(malloc(Size));
 			SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
 			ReadFile(hFile, bytes.pBytes, Size, NULL, NULL);
 			file = AdjustPE(bytes);
-			if (Settings.Dump.RunningAddr) file->NTHeaders.x64.OptionalHeader.ImageBase = Settings.Dump.RunningAddr;
+			if (Settings.Dump.RunningAddr) {
+				if (file->x86) {
+					file->NTHeaders.x86.OptionalHeader.ImageBase = Settings.Dump.RunningAddr;
+				} else {
+					file->NTHeaders.x64.OptionalHeader.ImageBase = Settings.Dump.RunningAddr;
+				}
+			}
 			free(bytes.pBytes);
 		}
 		
@@ -280,8 +291,13 @@ int main(int argc, char** argv) {
 		if (Settings.Post.bRemoveDebug) {
 			file->NTHeaders.x64.FileHeader.NumberOfSymbols = 0;
 			file->NTHeaders.x64.FileHeader.PointerToSymbolTable = 0;
-			file->NTHeaders.x64.OptionalHeader.DataDirectory[6].Size = 0;
-			file->NTHeaders.x64.OptionalHeader.DataDirectory[6].VirtualAddress = 0;
+			if (file->x86) {
+				file->NTHeaders.x86.OptionalHeader.DataDirectory[6].Size = 0;
+				file->NTHeaders.x86.OptionalHeader.DataDirectory[6].VirtualAddress = 0;
+			} else {
+				file->NTHeaders.x64.OptionalHeader.DataDirectory[6].Size = 0;
+				file->NTHeaders.x64.OptionalHeader.DataDirectory[6].VirtualAddress = 0;
+			}
 			printf("Removed debugging info\n");
 		}
 
@@ -291,15 +307,15 @@ int main(int argc, char** argv) {
 				// Skip non-executable sections
 				if (Settings.Post.bIgnoreNonExecutable && !(file->pSectionHeaders[sec].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
 				
-				for (int i = 0; i < sizeof(Sigs::EPs) / sizeof(Sigs::EPs[0]); i++) {
+				for (int i = 0; i < (file->x86 ? sizeof(Sigs::EPs_32) : sizeof(Sigs::EPs_64)) / sizeof(Sig); i++) {
 					Buffer data = { 0 };
 					data.pBytes = file->pSectionData[sec];
 					data.u64Size = file->pSectionHeaders[sec].SizeOfRawData;
-					uint64_t nOff = FindSig(data, Sigs::EPs[i].raw, Sigs::EPs[i].mask);
+					uint64_t nOff = FindSig(data, file->x86 ? Sigs::EPs_32[i].raw : Sigs::EPs_64[i].raw, file->x86 ? Sigs::EPs_32[i].mask : Sigs::EPs_64[i].mask);
 					if (nOff != _UI64_MAX) {
-						printf("EP match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, Sigs::EPs[i].name);
+						printf("EP match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, file->x86 ? Sigs::EPs_32[i].name : Sigs::EPs_64[i].name);
 						if (Settings.Post.bSetIfFound) {
-							file->NTHeaders.x64.OptionalHeader.AddressOfEntryPoint = file->pSectionHeaders[sec].VirtualAddress + nOff, Sigs::EPs[i].name;
+							file->NTHeaders.x64.OptionalHeader.AddressOfEntryPoint = file->pSectionHeaders[sec].VirtualAddress + nOff;
 						}
 					}
 				}
@@ -314,13 +330,13 @@ int main(int argc, char** argv) {
 				// Skip non-executable sections
 				if (Settings.Post.bIgnoreNonExecutable && !(file->pSectionHeaders[sec].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
 
-				for (int i = 0; i < sizeof(Sigs::TLS) / sizeof(Sigs::TLS[0]); i++) {
+				for (int i = 0; i < (file->x86 ? sizeof(Sigs::TLS_32) : sizeof(Sigs::TLS_64)) / sizeof(Sig); i++) {
 					Buffer data = { 0 };
 					data.pBytes = file->pSectionData[sec];
 					data.u64Size = file->pSectionHeaders[sec].SizeOfRawData;
-					uint64_t nOff = FindSig(data, Sigs::TLS[i].raw, Sigs::TLS[i].mask);
+					uint64_t nOff = FindSig(data, file->x86 ? Sigs::TLS_32[i].raw : Sigs::TLS_64[i].raw, file->x86 ? Sigs::TLS_32[i].mask : Sigs::TLS_64[i].mask);
 					if (nOff != _UI64_MAX) {
-						printf("Callback match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, Sigs::TLS[i].name);
+						printf("Callback match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, file->x86 ? Sigs::EPs_32[i].name : Sigs::EPs_64[i].name);
 						if (Settings.Post.bSetIfFound) {
 							Callbacks.Push(file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff);
 						}
@@ -369,12 +385,15 @@ PE* DumpPEFromMemory(_In_ HANDLE hProcess, _In_opt_ uint64_t u64Base, _In_opt_ P
 		pHeaders->DosStub.u64Size = pHeaders->DosHeader.e_lfanew - sizeof(IMAGE_DOS_HEADER);
 		pHeaders->DosStub.pBytes = reinterpret_cast<BYTE*>(malloc(pHeaders->DosStub.u64Size));
 		ReadProcessMemory(hProcess, (LPVOID)(u64Base + sizeof(IMAGE_DOS_HEADER)), pHeaders->DosStub.pBytes, pHeaders->DosStub.u64Size, NULL);
-		ReadProcessMemory(hProcess, (LPVOID)(u64Base + pHeaders->DosHeader.e_lfanew), &pHeaders->NTHeaders, sizeof(IMAGE_NT_HEADERS64), NULL);
+		ReadProcessMemory(hProcess, (LPVOID)(u64Base + pHeaders->DosHeader.e_lfanew), &pHeaders->NTHeaders, sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER), NULL);
+		pHeaders->x86 = pHeaders->NTHeaders.x64.FileHeader.Characteristics & IMAGE_FILE_32BIT_MACHINE;
+		ReadProcessMemory(hProcess, (LPVOID)(u64Base + pHeaders->DosHeader.e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER)), &pHeaders->NTHeaders.x64.OptionalHeader, pHeaders->x86 ? sizeof(IMAGE_NT_HEADERS32) : sizeof(IMAGE_NT_HEADERS64), NULL);
 		if (pHeaders->DosHeader.e_magic != IMAGE_DOS_SIGNATURE || pHeaders->NTHeaders.x64.Signature != IMAGE_NT_SIGNATURE) {
 			printf("Failed to read process headers!\n");
 			return NULL;
 		}
 		pHeaders->pSectionHeaders = reinterpret_cast<IMAGE_SECTION_HEADER*>(malloc(sizeof(IMAGE_SECTION_HEADER) * pHeaders->NTHeaders.x64.FileHeader.NumberOfSections));
+		ReadProcessMemory(hProcess, (LPVOID)(u64Base + pHeaders->DosHeader.e_lfanew + (pHeaders->x86 ? sizeof(IMAGE_NT_HEADERS32) : sizeof(IMAGE_NT_HEADERS64))), pHeaders->pSectionHeaders, sizeof(IMAGE_SECTION_HEADER) * pHeaders->NTHeaders.x64.FileHeader.NumberOfSections, NULL);
 		pHeaders->pSectionData = reinterpret_cast<BYTE**>(calloc(pHeaders->NTHeaders.x64.FileHeader.NumberOfSections, sizeof(BYTE*)));
 	}
 
@@ -397,8 +416,12 @@ PE* DumpPEFromMemory(_In_ HANDLE hProcess, _In_opt_ uint64_t u64Base, _In_opt_ P
 	}
 
 	// return
-	if (bUnloadHeaders && pHeaders) delete pHeaders;
-	ret->NTHeaders.x64.OptionalHeader.ImageBase = u64Base;
+	//if (bUnloadHeaders && pHeaders) delete pHeaders;
+	if (ret->x86) {
+		ret->NTHeaders.x86.OptionalHeader.ImageBase = u64Base;
+	} else {
+		ret->NTHeaders.x64.OptionalHeader.ImageBase = u64Base;
+	}
 	ret->FixHeaders();
 	return ret;
 }
@@ -427,13 +450,20 @@ PE* AdjustPE(_In_ Buffer raw) {
 			printf("Invalid headers!\n");
 			return NULL;
 		}
-		ReadFile(hFile, raw.pBytes + sizeof(IMAGE_DOS_HEADER), pDosHeader->e_lfanew - sizeof(IMAGE_DOS_HEADER) + sizeof(IMAGE_NT_HEADERS64), NULL, NULL);
-		IMAGE_NT_HEADERS64* pNtHeaders = reinterpret_cast<IMAGE_NT_HEADERS64*>(raw.pBytes + pDosHeader->e_lfanew);
+		ReadFile(hFile, raw.pBytes + sizeof(IMAGE_DOS_HEADER), pDosHeader->e_lfanew - sizeof(IMAGE_DOS_HEADER) + sizeof(IMAGE_FILE_HEADER) + sizeof(DWORD), NULL, NULL);
+		IMAGE_NT_HEADERS* pNtHeaders = reinterpret_cast<IMAGE_NT_HEADERS*>(raw.pBytes + pDosHeader->e_lfanew);
+		if (reinterpret_cast<IMAGE_FILE_HEADER*>(raw.pBytes + pDosHeader->e_lfanew + sizeof(DWORD))->Characteristics & IMAGE_FILE_32BIT_MACHINE) {
+			ReadFile(hFile, raw.pBytes + pDosHeader->e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER), sizeof(IMAGE_OPTIONAL_HEADER32), NULL, NULL);
+			ReadFile(hFile, raw.pBytes + pDosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS32), pNtHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER), NULL, NULL);
+		} else {
+			ReadFile(hFile, raw.pBytes + pDosHeader->e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER), sizeof(IMAGE_OPTIONAL_HEADER64), NULL, NULL);
+			ReadFile(hFile, raw.pBytes + pDosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS64), pNtHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER), NULL, NULL);
+		}
 		if (pNtHeaders->Signature != IMAGE_NT_SIGNATURE) {
 			printf("Invalid headers!\n");
 			return NULL;
 		}
-		ReadFile(hFile, raw.pBytes + pDosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS64), pNtHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER), NULL, NULL);
+		CloseHandle(hFile);
 	}
 
 	// Load headers
@@ -453,6 +483,7 @@ PE* AdjustPE(_In_ Buffer raw) {
 	}
 	pAdjusted->pSectionHeaders = reinterpret_cast<IMAGE_SECTION_HEADER*>(malloc(pAdjusted->NTHeaders.x64.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)));
 	memcpy(pAdjusted->pSectionHeaders, raw.pBytes + pAdjusted->DosHeader.e_lfanew + sizeof(IMAGE_NT_HEADERS64), pAdjusted->NTHeaders.x64.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER));
+	pAdjusted->x86 = pAdjusted->NTHeaders.x64.FileHeader.Characteristics & IMAGE_FILE_32BIT_MACHINE;
 
 	// Load sections
 	pAdjusted->pSectionData = reinterpret_cast<BYTE**>(malloc(pAdjusted->NTHeaders.x64.FileHeader.NumberOfSections * sizeof(BYTE*)));
@@ -500,7 +531,7 @@ void HelpMenu(_In_ char* argv0) {
 	printf("\t--no-oep\tDon\'t scan for possible OEP\n");
 	printf("\t--no-tls\tDon\'t scan for possible TLS callbacks\n");
 	printf("\t--no-debug\tDon\'t remove debugging information\n");
-	printf("\t--disk\t\tFILE has already been adjusted to disk format (i.e. Scylla dump)\n");
+	printf("\t--dumped\tFILE is a raw dump and needs to be adjusted to disk format\n");
 	printf("\t--x-only\tOnly scan memory in executable ranges\n");
 }
 
