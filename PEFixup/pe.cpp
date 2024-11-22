@@ -1,3 +1,5 @@
+// This is old and ugly and I made a newer version, but I don't feel like replacing it (if it aint broke dont fix it)
+
 #include "pe.hpp"
 
 PE::PE(_In_ char* sFileName) {

@@ -375,7 +375,7 @@ int main(int argc, char** argv) {
 					data.u64Size = file->pSectionHeaders[sec].SizeOfRawData;
 					uint64_t nOff = FindSig(data, file->x86 ? Sigs::TLS_32[i].raw : Sigs::TLS_64[i].raw, file->x86 ? Sigs::TLS_32[i].mask : Sigs::TLS_64[i].mask);
 					if (nOff != _UI64_MAX) {
-						printf("Callback match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, file->x86 ? Sigs::EPs_32[i].name : Sigs::EPs_64[i].name);
+						printf("Callback match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, file->x86 ? Sigs::TLS_32[i].name : Sigs::TLS_64[i].name);
 					}
 				}
 			}
