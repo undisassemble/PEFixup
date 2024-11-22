@@ -1,6 +1,6 @@
 # PEFixup
 
-Just some stuff I thought would be useful when working with packed binaries.
+Just some stuff I thought would be useful when working with packed binaries. I will continue to add signatures, as it currently only has a few.
 
 Please note this is not intended to produce working binaries, and will not provide any help with some tasks such as IAT reconstruction.
 
