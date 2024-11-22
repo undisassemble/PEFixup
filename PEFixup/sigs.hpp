@@ -21,11 +21,13 @@ namespace _Sigs {
 	namespace x86 {
 		Sig EP_MINGW = { (BYTE*)"\x8D\x4C\x24\x04\x83\xE4\xF0\xFF\x71\xFC\x55\x89\xE5\x57\x56\x53\x31\xDB\x51\x83\xEC\x28\x8B\x35\x00\x00\x00\x00\x64\xA1\x18\x00\x00\x00\x8B\x78\x04\xEB", "xxxxxxxxxxxxxxxxxxxxxxxx????xxxxxxxxxx", "MinGW G++" };
 	
+		Sig TLS1_MINGW = { (BYTE*)"\x56\x53\x83\xEC\x14\x83\x3D\x00\x00\x00\x00\x02\x8B\x44\x24\x24\x74\x00\xC7\x05\x00\x00\x00\x00\x02\x00\x00\x00", "xxxxxxx????xxxxxx?xx????xxxx", "MinGW G++" };
 		Sig TLS2_MINGW = { (BYTE*)"\x83\xEC\x1C\x8B\x44\x24\x24\x83\xF8\x03\x74\x00\x85\xC0\x74\x00\xB8\x01\x00\x00\x00\x83\xC4\x1C\xC2\x0C\x00", "xxxxxxxxxxx?xxx?xxxxxxxxxxx", "MinGW G++" };
 	}
 }
 
 namespace Sigs {
+	// 64 bit entry points
 	Sig EPs_64[] = {
 		_Sigs::x64::EP_MSVC,
 		_Sigs::x64::EP_MINGW,
@@ -33,15 +35,20 @@ namespace Sigs {
 		_Sigs::x64::EP_MINGW_DLL
 	};
 
+	// 64 bit TLS callbacks
 	Sig TLS_64[] = {
 		_Sigs::x64::TLS1_MINGW,
 		_Sigs::x64::TLS2_MINGW
 	};
 
+	// 32 bit entry points
 	Sig EPs_32[] = {
 		_Sigs::x86::EP_MINGW
 	};
+
+	// 32 bit TLS callbacks
 	Sig TLS_32[] = {
+		_Sigs::x86::TLS1_MINGW,
 		_Sigs::x86::TLS2_MINGW
 	};
 }

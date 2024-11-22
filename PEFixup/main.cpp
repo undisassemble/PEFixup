@@ -31,7 +31,6 @@ struct {
 	} Dump;
 	
 	struct {
-		bool bSetIfFound : 1 = true;
 		bool bScanEntry : 1 = true;
 		bool bScanTLS : 1 = true;
 		bool bFixLayout : 1 = false;
@@ -209,7 +208,7 @@ int main(int argc, char** argv) {
 			entry.dwSize = sizeof(PROCESSENTRY32);
 			HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 			if (!hSnap || hSnap == INVALID_HANDLE_VALUE) {
-				printf("Could not get list of processes\n");
+				printf("Could not get list of processes (%d)\n", GetLastError());
 				return 1;
 			}
 			Process32First(hSnap, &entry);
@@ -237,8 +236,11 @@ int main(int argc, char** argv) {
 		// Get module address
 		if (Settings.Dump.module) {
 			HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, dwPID);
+			while ((!hSnap || hSnap == INVALID_HANDLE_VALUE) && GetLastError() == ERROR_BAD_LENGTH) {
+				hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, dwPID);
+			}
 			if (!hSnap || hSnap == INVALID_HANDLE_VALUE) {
-				printf("Could not get list of modules\n");
+				printf("Could not get list of modules (%d)\n", GetLastError());
 				return 1;
 			}
 			MODULEENTRY32 entry = { 0 };
@@ -356,9 +358,6 @@ int main(int argc, char** argv) {
 					uint64_t nOff = FindSig(data, file->x86 ? Sigs::EPs_32[i].raw : Sigs::EPs_64[i].raw, file->x86 ? Sigs::EPs_32[i].mask : Sigs::EPs_64[i].mask);
 					if (nOff != _UI64_MAX) {
 						printf("EP match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, file->x86 ? Sigs::EPs_32[i].name : Sigs::EPs_64[i].name);
-						if (Settings.Post.bSetIfFound) {
-							file->NTHeaders.x64.OptionalHeader.AddressOfEntryPoint = file->pSectionHeaders[sec].VirtualAddress + nOff;
-						}
 					}
 				}
 			}
@@ -366,8 +365,6 @@ int main(int argc, char** argv) {
 
 		// Scan for TLS callbacks
 		if (Settings.Post.bScanTLS) {
-			Vector<uint64_t> Callbacks;
-
 			for (int sec = 0; sec < file->NTHeaders.x64.FileHeader.NumberOfSections; sec++) {
 				// Skip non-executable sections
 				if (Settings.Post.bIgnoreNonExecutable && !(file->pSectionHeaders[sec].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
@@ -379,9 +376,6 @@ int main(int argc, char** argv) {
 					uint64_t nOff = FindSig(data, file->x86 ? Sigs::TLS_32[i].raw : Sigs::TLS_64[i].raw, file->x86 ? Sigs::TLS_32[i].mask : Sigs::TLS_64[i].mask);
 					if (nOff != _UI64_MAX) {
 						printf("Callback match: %p (%s)\n", file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff, file->x86 ? Sigs::EPs_32[i].name : Sigs::EPs_64[i].name);
-						if (Settings.Post.bSetIfFound) {
-							Callbacks.Push(file->GetBaseAddress() + file->pSectionHeaders[sec].VirtualAddress + nOff);
-						}
 					}
 				}
 			}
@@ -555,7 +549,8 @@ void HelpMenu(_In_ char* argv0) {
 	printf("\tpost\t\tIntended for use on a dumped application\n\n");
 
 	printf("GENERAL OPTIONS\n");
-	printf("\t-o OUTPUT\tSelect output path\n\n");
+	printf("\t-o OUTPUT\tSelect output path\n");
+	printf("\t--help\t\tDisplay this menu\n\n");
 
 	printf("PRE OPTIONS\n");
 	printf("\t--no-aslr\tDon\'t touch ASLR, leave as is\n");
@@ -570,12 +565,11 @@ void HelpMenu(_In_ char* argv0) {
 
 	printf("POST OPTIONS\n");
 	printf("\t--headers FILE\tSpecify PE that contains dumped PE\'s headers\n");
-	printf("\t--dont-set\tDon\'t change EP or TLS entry points, even if matching sig is found\n");
 	printf("\t--no-oep\tDon\'t scan for possible OEP\n");
 	printf("\t--no-tls\tDon\'t scan for possible TLS callbacks\n");
 	printf("\t--no-debug\tDon\'t remove debugging information\n");
 	printf("\t--dumped\tFILE is a raw dump and needs to be adjusted to disk format\n");
-	printf("\t--x-only\tOnly scan memory in executable ranges\n");
+	printf("\t--x-only\tOnly scan executable memory\n");
 }
 
 
