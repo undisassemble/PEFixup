@@ -26,6 +26,7 @@ struct {
 		bool bPID : 1 = false;
 		bool bName : 1 = false;
 		char* headers = NULL;
+		char* module = NULL;
 		uint64_t RunningAddr = 0;
 	} Dump;
 	
@@ -118,6 +119,13 @@ int main(int argc, char** argv) {
 			Settings.Post.bFixLayout = true;
 		} else if (!lstrcmpA(argv[i], "--x-only")) {
 			Settings.Post.bIgnoreNonExecutable = true;
+		} else if (!lstrcmpA(argv[i], "--module")) {
+			if (i == argc - 1) {
+				printf("NAME required\n");
+				return 1;
+			}
+			Settings.Dump.module = argv[i + 1];
+			i++;
 		} else {
 			printf("Unrecognized parameter \'%s\'\n", argv[i]);
 			return 1;
@@ -179,13 +187,20 @@ int main(int argc, char** argv) {
 
 	// Dump mode
 	else if (Settings.mode == DUMP) {
+		// Have --base override --module
+		if (Settings.Dump.module && Settings.Dump.RunningAddr) {
+			printf("Both --module and --base were specified, ignoring module\n");
+			Settings.Dump.module = NULL;
+		}
+
 		// Get handle to running process
 		HANDLE hProc = NULL;
+		DWORD dwPID = 0;
 		if (Settings.Dump.bPID) {
-			DWORD PID = strtoul(Settings.input, NULL, 0);
-			hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, PID);
+			dwPID = strtoul(Settings.input, NULL, 0);
+			hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, dwPID);
 			if (!hProc || hProc == INVALID_HANDLE_VALUE) {
-				printf("Could not open process with PID %d (Reason: %d)\n", PID, GetLastError());
+				printf("Could not open process with PID %d (Reason: %d)\n", dwPID, GetLastError());
 				return 1;
 			}
 		} else if (Settings.Dump.bName) {
@@ -208,7 +223,8 @@ int main(int argc, char** argv) {
 			}
 
 			// Open process
-			hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, entry.th32ProcessID);
+			dwPID = entry.th32ProcessID;
+			hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, dwPID);
 			if (!hProc || hProc == INVALID_HANDLE_VALUE) {
 				printf("Could not open process \'%s\' (Reason: %d)\n", Settings.input, GetLastError());
 				return 1;
@@ -218,6 +234,32 @@ int main(int argc, char** argv) {
 			return 1;
 		}
 
+		// Get module address
+		if (Settings.Dump.module) {
+			HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, dwPID);
+			if (!hSnap || hSnap == INVALID_HANDLE_VALUE) {
+				printf("Could not get list of modules\n");
+				return 1;
+			}
+			MODULEENTRY32 entry = { 0 };
+			entry.dwSize = sizeof(MODULEENTRY32);
+			Module32First(hSnap, &entry);
+			do {
+				if (!lstrcmpA(entry.szModule, Settings.Dump.module)) break;
+			} while (Module32Next(hSnap, &entry));
+			CloseHandle(hSnap);
+			if (lstrcmpA(entry.szModule, Settings.Dump.module)) {
+				printf("Could not find module \'%s\'\n", Settings.Dump.module);
+				return 1;
+			}
+			Settings.Dump.RunningAddr = reinterpret_cast<uint64_t>(entry.modBaseAddr);
+			printf("Address of %s: 0x%p\n", Settings.Dump.module, Settings.Dump.RunningAddr);
+			if (!Settings.Dump.headers) {
+				Settings.Dump.headers = reinterpret_cast<char*>(malloc(lstrlenA(entry.szExePath) + 1)); // Leaking memory here but guess what, I don't care
+				strcpy_s(Settings.Dump.headers, lstrlenA(entry.szExePath) + 1, entry.szExePath);
+				printf("Path for %s: %s\n", Settings.Dump.module, Settings.Dump.headers);
+			}
+		}
 
 		// Dump process
 		PE* pHeaders = NULL;
@@ -523,7 +565,8 @@ void HelpMenu(_In_ char* argv0) {
 	printf("\t--pid\t\tFILE is the PID of a running process\n");
 	printf("\t--name\t\tFILE is the name of a running process\n");
 	printf("\t--base ADDRESS\tBase address of running process/dumped PE\n");
-	printf("\t--headers FILE\tSpecify PE that contains dumped PE\'s headers\n\n");
+	printf("\t--headers FILE\tSpecify PE that contains dumped PE\'s headers\n");
+	printf("\t--module NAME\tDump a loaded module in the process, instead of the process itself\n\n");
 
 	printf("POST OPTIONS\n");
 	printf("\t--headers FILE\tSpecify PE that contains dumped PE\'s headers\n");
